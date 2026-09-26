@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import copy
 import gzip
 import html
@@ -6,13 +8,15 @@ import unicodedata
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
-SOURCE_URL = (
-    "https://epgshare01.online/epgshare01/"
-    "epg_ripper_DE1.xml.gz"
-)
 OUTPUT_FILE = "epg.xml.gz"
+
+# Hauptquelle. Weitere Quellen können später einfach ergänzt werden.
+SOURCE_URLS = [
+    "https://epgshare01.online/epgshare01/epg_ripper_DE1.xml.gz",
+]
 
 QUALITY_WORDS = {
     "hd", "fhd", "sd", "uhd", "4k", "mobile",
@@ -24,7 +28,7 @@ def clean_text(value):
     if not value:
         return ""
     old = value
-    for _ in range(2):
+    for _ in range(3):
         new = html.unescape(old)
         if new == old:
             break
@@ -45,6 +49,7 @@ def normalize(value):
     value = value.replace("sportdigital", "sport digital")
     value = value.replace("eurosport", "euro sport")
     value = value.replace("bndliga", "bundesliga")
+    value = value.replace("myteamtv", "myteam tv")
 
     value = re.sub(r"\([^)]*\)", " ", value)
     value = re.sub(r"[^a-z0-9]+", " ", value)
@@ -81,20 +86,103 @@ def alias_id(name):
     return "vera." + (slug or "channel")
 
 
+def download_xml(url):
+    print(f"Lade EPG: {url}")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (GitHub Actions EPG Builder)"
+        },
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        data = response.read()
+
+    if url.lower().endswith(".gz"):
+        with gzip.GzipFile(fileobj=BytesIO(data)) as gz:
+            data = gz.read()
+
+    root = ET.fromstring(data)
+    fix_entities(root)
+    return root
+
+
+def merge_sources(urls):
+    merged = ET.Element(
+        "tv",
+        {
+            "generator-info-name": "Schalke-Fan my-epg",
+            "generator-info-url": "https://github.com/Schalke-Fan/my-epg",
+        },
+    )
+
+    seen_channels = set()
+    seen_programmes = set()
+
+    loaded = 0
+
+    for url in urls:
+        try:
+            root = download_xml(url)
+        except Exception as exc:
+            print(f"WARNUNG: Quelle konnte nicht geladen werden: {url}")
+            print(f"         {type(exc).__name__}: {exc}")
+            continue
+
+        loaded += 1
+
+        for channel in root.findall("channel"):
+            cid = channel.get("id")
+            if not cid or cid in seen_channels:
+                continue
+            merged.append(copy.deepcopy(channel))
+            seen_channels.add(cid)
+
+        for programme in root.findall("programme"):
+            cid = programme.get("channel")
+            start = programme.get("start", "")
+            stop = programme.get("stop", "")
+            title_node = programme.find("title")
+            title = title_node.text if title_node is not None and title_node.text else ""
+
+            key = (cid, start, stop, title)
+            if key in seen_programmes:
+                continue
+
+            merged.append(copy.deepcopy(programme))
+            seen_programmes.add(key)
+
+    if loaded == 0:
+        raise RuntimeError("Keine EPG-Quelle konnte geladen werden.")
+
+    return merged
+
+
+# ---------------------------------------------------------------------
+# Alias-Regeln
+# ---------------------------------------------------------------------
+
 ALIAS_REQUESTS = []
 
 
-def add(source_candidates, *aliases):
-    if isinstance(source_candidates, str):
+def add(source_candidates, *aliases, fallback=False, fallback_title=None):
+    if source_candidates is None:
+        source_candidates = []
+    elif isinstance(source_candidates, str):
         source_candidates = [source_candidates]
+
     ALIAS_REQUESTS.append(
-        (list(source_candidates), list(aliases))
+        {
+            "sources": list(source_candidates),
+            "aliases": list(aliases),
+            "fallback": fallback,
+            "fallback_title": fallback_title,
+        }
     )
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # SKY BUNDESLIGA
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 for n in range(1, 11):
     aliases = [
@@ -102,8 +190,10 @@ for n in range(1, 11):
         f"Bndliga {n} HD",
         f"Bndliga {n} SD",
     ]
+
     if n <= 6:
         aliases.append(f"Bndliga {n} Mobile")
+
     if n == 1:
         aliases += [
             "Bndliga 1 UHD",
@@ -114,259 +204,265 @@ for n in range(1, 11):
 
     add(
         [
+            f"Sky.Sport.Bundesliga.{n}.de",
             f"Sky Sport Bundesliga {n}",
             f"Sky Bundesliga {n}",
             f"Bundesliga {n}",
         ],
         *aliases,
+        fallback=True,
     )
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # DAZN
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 for n in (1, 2):
     add(
-        [f"DAZN {n}", f"DAZN{n}"],
+        [
+            f"DAZN.{n}.de",
+            f"DAZN {n}",
+            f"DAZN{n}",
+        ],
         f"DAZN {n} Vip",
         f"DAZN {n} FHD",
         f"DAZN {n} HD",
         f"DAZN {n} SD",
+        fallback=True,
     )
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # SKY CINEMA / ENTERTAINMENT
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 add(
-    "Sky Cinema Action",
+    [
+        "Sky.Cinema.Action.HD.de",
+        "Sky Cinema Action HD",
+        "Sky Cinema Action",
+    ],
     "Sky Cinema Action HD",
     "Sky Cinema Action FHD",
+    fallback=True,
 )
+
+# Sky Cinema Feelgood ist der Nachfolger von Sky Cinema Family.
 add(
-    ["Sky Cinema Feelgood", "Sky Cinema Feel Good"],
+    [
+        "Sky.Cinema.Family.HD.de",
+        "Sky Cinema Family HD",
+        "Sky Cinema Family",
+        "Sky Cinema Feelgood",
+        "Sky Cinema Feel Good",
+    ],
     "Sky Cinema Feelgood HD",
     "Sky Cinema Feelgood FHD",
+    fallback=True,
 )
+
 add(
-    "Sky Cinema Premiere",
+    [
+        "Sky.Cinema.Premiere.HD.de",
+        "Sky Cinema Premiere HD",
+        "Sky Cinema Premiere",
+    ],
     "Sky Cinema Premiere HD",
     "Sky Cinema Premiere FHD",
+    fallback=True,
 )
+
+# Sky Cinema Blockbuster ist der Nachfolger von Sky Cinema Highlights.
 add(
-    "Sky Cinema Blockbuster",
+    [
+        "Sky.Cinema.Highlights.HD.de",
+        "Sky Cinema Highlights HD",
+        "Sky Cinema Highlights",
+        "Sky Cinema Blockbuster",
+    ],
     "Sky Cinema Blockbuster HD",
     "Sky Cinema Blockbuster FHD",
+    fallback=True,
 )
+
 add(
-    "Sky One",
+    [
+        "Sky.One.de",
+        "Sky One",
+    ],
     "Sky ONE HD",
     "Sky One FHD",
+    fallback=True,
 )
+
 add(
-    "Sky Atlantic",
+    [
+        "Sky.Atlantic.HD.de",
+        "Sky Atlantic HD",
+        "Sky Atlantic",
+    ],
     "Sky Atlantic HD",
     "Sky Atlantic FHD",
+    fallback=True,
 )
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # SPORT
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 SPORT_MAP = [
     (
-        ["Eurosport 1", "EuroSport 1"],
+        ["Eurosport.1.de", "Eurosport 1", "EuroSport 1"],
         ["Eurosport 1 FHD", "Eurosport 1 HD"],
     ),
     (
-        ["Eurosport 2", "EuroSport 2"],
-        [
-            "Eurosport 2 FHD",
-            "Eurosport 2 HD",
-            "EuroSport 2 Xtra HD",
-        ],
+        ["Eurosport.2.de", "Eurosport 2", "EuroSport 2"],
+        ["Eurosport 2 FHD", "Eurosport 2 HD", "EuroSport 2 Xtra HD"],
     ),
     (
-        ["Sport1", "Sport 1"],
+        ["SPORT1.de", "SPORT1", "Sport1", "Sport 1"],
         ["Sport1 Vip", "Sport1 FHD", "Sport1 HD"],
     ),
     (
-        [
-            "sportdigital FUSSBALL",
-            "Sportdigital",
-            "Sport Digital",
-        ],
+        ["SPORT1+.de", "SPORT1+", "Sport1+"],
+        ["Sport1+ FHD", "Sport1+ HD"],
+    ),
+    (
+        ["sportdigital.Fussball.de", "sportdigital FUSSBALL", "Sportdigital"],
         ["Sport Digital FHD", "Sport Digital HD"],
     ),
     (
-        ["Auto Motor und Sport", "auto motor und sport"],
+        ["Auto.Motor.Sport.de", "Auto Motor Sport", "Auto Motor und Sport"],
         ["Auto Motor und Sport"],
     ),
     (
-        ["Motorvision TV", "Motorvision"],
+        ["Motorvision.TV.de", "Motorvision TV", "Motorvision"],
         ["Motorvision TV FHD", "Motorvision TV HD"],
     ),
     (
-        "Red Bull TV",
-        ["Red Bull TV", "RED BULL TV FHD"],
-    ),
-    (
-        "More Than Sports TV",
+        ["More.than.Sports.TV.de", "More Than Sports TV"],
         ["More Than Sports TV FHD", "More Than Sports TV HD"],
     ),
     (
-        ["eSports1", "eSports 1"],
+        ["eSports1.de", "eSports1", "eSports 1"],
         ["eSports 1 FHD", "eSports 1 HD"],
     ),
     (
-        ["BR24Sport", "BR24 Sport"],
-        ["BR24Sport"],
-    ),
-    (
-        ["FC Bayern TV", "FC Bayern.tv"],
-        ["FC Bayern TV"],
-    ),
-    (
-        "DFB Play",
+        ["DFB.Play.de", "DFB Play"],
         ["DFB Play"],
     ),
     (
-        ["ServusTV", "Servus TV"],
-        [
-            "SERVUS TV MOTORSPORT FHD",
-            "SERVUS TV MOTORSPORT HD",
-        ],
-    ),
-    (
-        ["MS Sport", "MagentaSport", "Magenta Sport"],
+        ["MS.Sport.de", "MS Sport"],
         ["MS SPORT"],
     ),
 ]
 
 for sources, aliases in SPORT_MAP:
-    add(sources, *aliases)
+    add(sources, *aliases, fallback=True)
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # REGULÄRE FILM-/SERIENSENDER
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 REGULAR_MAP = [
-    (["TELE 5", "Tele 5"], ["TELE 5"]),
-    ("Silverline", ["Silverline"]),
-    ("AXN Black", ["AXN Black"]),
-    ("AXN White", ["AXN White"]),
-    (["Universal TV", "Universal"], ["Universal FHD"]),
-    (["Kinowelt TV", "Kinowelt"], ["Kinowelt Tv"]),
+    (["Tele.5.de", "TELE 5", "Tele 5"], ["TELE 5"]),
+    (["Silverline.de", "Silverline"], ["Silverline"]),
+    (["AXN.Black.de", "AXN Black"], ["AXN Black"]),
+    (["AXN.White.de", "AXN White"], ["AXN White"]),
+    (["Universal.Channel.HD.de", "Universal TV", "Universal"], ["Universal FHD"]),
+    (["KinoweltTV.de", "Kinowelt TV", "Kinowelt"], ["Kinowelt Tv"]),
 ]
 
 for sources, aliases in REGULAR_MAP:
-    add(sources, *aliases)
+    add(sources, *aliases, fallback=True)
 
 
-# ------------------------------------------------------------
-# AMAZON PRIME
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# MYTEAM TV / MAGENTA
+# ---------------------------------------------------------------------
 
-add(
-    ["Prime Video", "Amazon Prime Video", "Amazon Prime"],
-    "AMAZON PRIME RAW",
-    "AMAZON PRIME FHD",
-    "AMAZON PRIME HD",
-    "AMAZON PRIME SD",
-    "AMAZON PRIME BACKUP",
-)
+for n in range(1, 19):
+    add(
+        [
+            f"Sport.{n}.-.myTeamTV.de",
+            f"Sport {n} - myTeamTV",
+            f"MyTeam TV {n}",
+            f"MyTeamTV {n}",
+        ],
+        f"MyTeam TV - {n}",
+        fallback=True,
+    )
+
+for n in (1, 2):
+    # Wenn keine echte Golf-Quelle vorhanden ist, bleibt wenigstens
+    # ein klar gekennzeichneter Platzhalter statt "EPG nicht verfügbar".
+    add(
+        [],
+        f"MS GOLF {n} FHD",
+        f"MS GOLF {n} HD",
+        fallback=True,
+        fallback_title=f"MS GOLF {n} – Eventkanal",
+    )
 
 
-# ------------------------------------------------------------
-# DYN SPORTS 1-25
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# DYN SPORT 1-25
+#
+# Diese Nummern sind providerseitige Eventkanäle. Es gibt aktuell keine
+# verlässliche öffentliche Zuordnung "DYN SPORT 1 = konkretes Event".
+# Daher KEINE erfundenen Spiele: nur klarer Platzhalter.
+# ---------------------------------------------------------------------
 
 for n in range(1, 26):
     add(
-        [
-            f"DYN Sport {n}",
-            f"DYN Sports {n}",
-            "DYN Sport",
-            "DYN Sports",
-        ],
+        [],
         f"DYN SPORT {n}",
+        fallback=True,
+        fallback_title=f"DYN SPORT {n} – Eventkanal",
     )
 
 
-# ------------------------------------------------------------
-# MAGENTA / MYTEAM
-# ------------------------------------------------------------
-
-for n in (1, 2):
-    add(
-        [
-            f"Magenta Golf {n}",
-            f"MagentaSport Golf {n}",
-            "MagentaSport",
-        ],
-        f"MS GOLF {n} FHD",
-        f"MS GOLF {n} HD",
-    )
-
-for n in range(1, 19):
-    add(
-        [
-            f"MyTeam TV {n}",
-            f"MyTeamTV {n}",
-            "MagentaSport",
-            "Magenta Sport",
-        ],
-        f"MyTeam TV - {n}",
-    )
-
-
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # DEL2 EVENT 01-20
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 for n in range(1, 21):
     add(
-        [
-            f"DEL2 {n}",
-            f"DEL2 Event {n}",
-            "DEL2",
-        ],
+        [],
         f"DEL2 EVENT {n:02d}",
+        fallback=True,
+        fallback_title=f"DEL2 EVENT {n:02d} – Eventkanal",
     )
 
 
-# ------------------------------------------------------------
-# SKY SELECT PREMIERE
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# SKY SELECT PREMIERE 1-18
+# ---------------------------------------------------------------------
 
 add(
-    ["Sky Select", "Sky Select Premiere"],
+    [],
     "Sky Select Premiere Vitrine HD",
+    fallback=True,
+    fallback_title="Sky Select Premiere Vitrine",
 )
 
 for n in range(1, 19):
     add(
-        [
-            f"Sky Select {n}",
-            f"Sky Select Premiere {n}",
-            "Sky Select",
-        ],
+        [],
         f"Sky Select Premiere {n} FHD",
+        fallback=True,
+        fallback_title=f"Sky Select Premiere {n}",
     )
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # PROVIDER-EIGENE 24/7-SERIEN UND FILMREIHEN
-#
-# Diese Einträge werden nur dann verbunden, wenn die EPG-Quelle
-# tatsächlich einen gleichnamigen Sender enthält.
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
-CUSTOM_NAMES = """
+CUSTOM_NAMES = r"""
 Squid Game 24/7
 The Challenge - Premium 24/7
 Breaking Bad 24/7
@@ -589,23 +685,35 @@ for name in [
     for line in CUSTOM_NAMES.splitlines()
     if line.strip()
 ]:
-    add(name, name)
+    add(
+        [],
+        name,
+        fallback=True,
+        fallback_title=name,
+    )
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # VERA / REDBOX / MAX / KINOPORTAL
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 for n in range(1, 14):
     add(
-        [f"Select Filme {n}", f"Select Kino {n}"],
+        [],
         f"SELECT FILME {n}",
+        fallback=True,
+        fallback_title=f"SELECT FILME {n}",
     )
 
 for n in range(1, 11):
-    add(f"Select Kino {n}", f"Select Kino {n}")
+    add(
+        [],
+        f"Select Kino {n}",
+        fallback=True,
+        fallback_title=f"Select Kino {n}",
+    )
 
-VERA_KINO = """
+VERA_KINO = r"""
 Vera Kino Action 1
 Vera Kino Action 2
 Vera Kino Action 3
@@ -630,77 +738,80 @@ for name in [
     for line in VERA_KINO.splitlines()
     if line.strip()
 ]:
-    add(name, name)
+    add(
+        [],
+        name,
+        fallback=True,
+        fallback_title=name,
+    )
 
 for n in range(1, 11):
     add(
-        [f"Vera Marvel {n}", "Vera Kino Marvel"],
+        [],
         f"Vera Marvel {n}",
+        fallback=True,
+        fallback_title=f"Vera Marvel {n}",
     )
 
 for n in range(1, 7):
     add(
-        [f"KinoPortal {n}", f"Kino Portal {n}"],
+        [],
         f"KinoPortal {n}",
+        fallback=True,
+        fallback_title=f"KinoPortal {n}",
     )
 
 for n in range(1, 13):
-    add(f"Redbox Kino {n}", f"REDBOX Kino {n}")
+    add(
+        [],
+        f"REDBOX Kino {n}",
+        fallback=True,
+        fallback_title=f"REDBOX Kino {n}",
+    )
 
-add("MAX Premiere", "MAX Premiere HD")
+add([], "MAX Premiere HD", fallback=True, fallback_title="MAX Premiere")
 for n in (2, 3):
-    add(f"MAX Premiere {n}", f"MAX Premiere {n} HD")
+    add(
+        [],
+        f"MAX Premiere {n} HD",
+        fallback=True,
+        fallback_title=f"MAX Premiere {n}",
+    )
 
-add("MAX Kino Collection", "MAX KINO COLLECTION")
+add([], "MAX KINO COLLECTION", fallback=True, fallback_title="MAX KINO COLLECTION")
+
 for n in range(1, 6):
-    add(f"MAX Kino {n}", f"MAX KINO {n}")
+    add(
+        [],
+        f"MAX KINO {n}",
+        fallback=True,
+        fallback_title=f"MAX KINO {n}",
+    )
 
-add("MAX Plus", "MAX Plus HD")
+add([], "MAX Plus HD", fallback=True, fallback_title="MAX Plus")
 
 for n in range(1, 5):
-    add(f"MAX Select {n}", f"Max Select {n} 4K")
+    add(
+        [],
+        f"Max Select {n} 4K",
+        fallback=True,
+        fallback_title=f"Max Select {n}",
+    )
 
 for n in range(1, 8):
-    add(f"MAX Select {n}", f"MAX SELECT HD {n}")
+    add(
+        [],
+        f"MAX SELECT HD {n}",
+        fallback=True,
+        fallback_title=f"MAX SELECT HD {n}",
+    )
 
 
-# ------------------------------------------------------------
-# EPG LADEN
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# EPG LADEN / INDEX
+# ---------------------------------------------------------------------
 
-print("EPG wird geladen:")
-print(SOURCE_URL)
-
-request = urllib.request.Request(
-    SOURCE_URL,
-    headers={
-        "User-Agent":
-        "Mozilla/5.0 (GitHub Actions EPG Builder)"
-    },
-)
-
-with urllib.request.urlopen(
-    request,
-    timeout=90,
-) as response:
-    compressed = response.read()
-
-print(f"Download: {len(compressed):,} Bytes")
-
-with gzip.GzipFile(
-    fileobj=BytesIO(compressed)
-) as gz:
-    xml_data = gz.read()
-
-print(f"Entpackt: {len(xml_data):,} Bytes")
-
-root = ET.fromstring(xml_data)
-fix_entities(root)
-
-
-# ------------------------------------------------------------
-# INDEX AUFBAUEN
-# ------------------------------------------------------------
+root = merge_sources(SOURCE_URLS)
 
 channels = root.findall("channel")
 programmes = root.findall("programme")
@@ -736,61 +847,47 @@ def score(query, cid):
     if not q:
         return -1
 
-    names = channel_names(
-        channels_by_id[cid]
-    ) + [cid]
-
+    names = channel_names(channels_by_id[cid]) + [cid]
     best = -1
 
     for name in names:
         c = normalize(name)
 
+        if not c:
+            continue
+
         if q == c:
             return 1000
 
-        if q and c and (
-            q in c or c in q
-        ):
-            best = max(
-                best,
-                800 - abs(len(q) - len(c)),
-            )
+        if q in c or c in q:
+            best = max(best, 850 - abs(len(q) - len(c)))
 
         q_words = set(q.split())
         c_words = set(c.split())
-
         if q_words and c_words:
             common = len(q_words & c_words)
             union = len(q_words | c_words)
-            best = max(
-                best,
-                int((common / union) * 700),
-            )
+            if union:
+                best = max(best, int((common / union) * 700))
 
     return best
 
 
 def resolve(source_candidates):
-    # 1. Exakter normalisierter Treffer.
+    # 1. Exakter normalisierter Treffer
     for candidate in source_candidates:
         key = normalize(candidate)
         ids = normalized_to_ids.get(key, [])
-
         if ids:
             ids = sorted(
                 set(ids),
-                key=lambda cid:
-                len(
-                    programmes_by_channel.get(
-                        cid,
-                        [],
-                    )
-                ),
+                key=lambda cid: len(programmes_by_channel.get(cid, [])),
                 reverse=True,
             )
             return ids[0]
 
-    # 2. Vorsichtige Ähnlichkeitssuche.
+    # 2. Sehr vorsichtige Ähnlichkeitssuche.
+    # Hoher Schwellenwert, damit z.B. DYN nicht fälschlich Sky Sport bekommt.
     best_id = None
     best_score = -1
 
@@ -801,92 +898,131 @@ def resolve(source_candidates):
                 best_score = current
                 best_id = cid
 
-    if best_score >= 560:
+    if best_score >= 720:
         return best_id
 
     return None
 
 
-# ------------------------------------------------------------
-# ALIAS-SENDER UND PROGRAMME ERZEUGEN
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
+# ALIAS-SENDER / PROGRAMME ERZEUGEN
+# ---------------------------------------------------------------------
 
 existing_ids = {
     channel.get("id")
     for channel in channels
+    if channel.get("id")
 }
 
 created_ids = set()
 new_channels = []
 new_programmes = []
+
+matched_real = 0
+synthetic = 0
 unmatched = []
-matched = 0
 
-for source_candidates, aliases in ALIAS_REQUESTS:
-    source_id = resolve(source_candidates)
 
-    if not source_id:
-        unmatched.extend(aliases)
-        continue
+def make_channel(name, cid):
+    channel = ET.Element("channel", {"id": cid})
+    display = ET.SubElement(channel, "display-name")
+    display.text = name
+    return channel
 
-    source_channel = channels_by_id[source_id]
-    source_programmes = (
-        programmes_by_channel.get(
-            source_id,
-            [],
+
+def xmltv_time(dt):
+    return dt.strftime("%Y%m%d%H%M%S +0000")
+
+
+def add_synthetic_programmes(cid, title):
+    # 10 Tagesblöcke: gestern bis acht Tage in die Zukunft.
+    now = datetime.now(timezone.utc)
+    start_day = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+
+    result = []
+
+    for offset in range(10):
+        start = start_day + timedelta(days=offset)
+        stop = start + timedelta(days=1)
+
+        programme = ET.Element(
+            "programme",
+            {
+                "start": xmltv_time(start),
+                "stop": xmltv_time(stop),
+                "channel": cid,
+            },
         )
-    )
+
+        title_node = ET.SubElement(programme, "title", {"lang": "de"})
+        title_node.text = title
+
+        desc = ET.SubElement(programme, "desc", {"lang": "de"})
+        desc.text = (
+            "Platzhalter-EPG: Für diesen providerseitigen 24/7-/Eventkanal "
+            "ist keine verlässliche externe Detail-EPG-Quelle verfügbar."
+        )
+
+        result.append(programme)
+
+    return result
+
+
+for request in ALIAS_REQUESTS:
+    source_candidates = request["sources"]
+    aliases = request["aliases"]
+    fallback = request["fallback"]
+    fallback_title = request["fallback_title"]
+
+    source_id = resolve(source_candidates) if source_candidates else None
+
+    source_channel = channels_by_id.get(source_id) if source_id else None
+    source_programmes = programmes_by_channel.get(source_id, []) if source_id else []
+
+    real_data_available = source_channel is not None and len(source_programmes) > 0
 
     for name in aliases:
         new_id = alias_id(name)
         original_id = new_id
         counter = 2
 
-        while (
-            new_id in existing_ids
-            or new_id in created_ids
-        ):
-            new_id = (
-                f"{original_id}.{counter}"
-            )
+        while new_id in existing_ids or new_id in created_ids:
+            new_id = f"{original_id}.{counter}"
             counter += 1
 
-        cloned_channel = copy.deepcopy(
-            source_channel
-        )
-        cloned_channel.set("id", new_id)
+        if real_data_available:
+            cloned_channel = copy.deepcopy(source_channel)
+            cloned_channel.set("id", new_id)
 
-        for node in list(
-            cloned_channel.findall(
-                "display-name"
+            for node in list(cloned_channel.findall("display-name")):
+                cloned_channel.remove(node)
+
+            display = ET.Element("display-name")
+            display.text = name
+            cloned_channel.insert(0, display)
+
+            new_channels.append(cloned_channel)
+
+            for programme in source_programmes:
+                cloned_programme = copy.deepcopy(programme)
+                cloned_programme.set("channel", new_id)
+                new_programmes.append(cloned_programme)
+
+            matched_real += 1
+
+        elif fallback:
+            new_channels.append(make_channel(name, new_id))
+            title = fallback_title or name
+            new_programmes.extend(
+                add_synthetic_programmes(new_id, title)
             )
-        ):
-            cloned_channel.remove(node)
+            synthetic += 1
 
-        display = ET.Element(
-            "display-name"
-        )
-        display.text = name
-        cloned_channel.insert(0, display)
+        else:
+            unmatched.append(name)
+            continue
 
-        new_channels.append(
-            cloned_channel
-        )
         created_ids.add(new_id)
-
-        for programme in source_programmes:
-            cloned_programme = copy.deepcopy(
-                programme
-            )
-            cloned_programme.set(
-                "channel",
-                new_id,
-            )
-            new_programmes.append(
-                cloned_programme
-            )
-
-        matched += 1
 
 
 # Neue Channels vor dem ersten Programmeintrag einfügen.
@@ -897,21 +1033,16 @@ for i, child in enumerate(list(root)):
         first_programme = i
         break
 
-for offset, channel in enumerate(
-    new_channels
-):
-    root.insert(
-        first_programme + offset,
-        channel,
-    )
+for offset, channel in enumerate(new_channels):
+    root.insert(first_programme + offset, channel)
 
 for programme in new_programmes:
     root.append(programme)
 
 
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 # AUSGABE
-# ------------------------------------------------------------
+# ---------------------------------------------------------------------
 
 xml_output = ET.tostring(
     root,
@@ -928,42 +1059,17 @@ with gzip.open(
 
 print()
 print("FERTIG")
-print(
-    f"Original-Sender: "
-    f"{len(channels)}"
-)
-print(
-    f"Original-Programme: "
-    f"{len(programmes)}"
-)
-print(
-    f"Neue Alias-Sender: "
-    f"{len(new_channels)}"
-)
-print(
-    f"Neue Programme: "
-    f"{len(new_programmes)}"
-)
-print(
-    f"Alias-Zuordnungen: "
-    f"{matched}"
-)
-print(
-    f"Nicht zugeordnet: "
-    f"{len(unmatched)}"
-)
-print(
-    f"Ausgabe: {OUTPUT_FILE}"
-)
+print(f"Original-Sender:     {len(channels)}")
+print(f"Original-Programme:  {len(programmes)}")
+print(f"Neue Alias-Sender:   {len(new_channels)}")
+print(f"Neue Programme:      {len(new_programmes)}")
+print(f"Echte Zuordnungen:   {matched_real}")
+print(f"Platzhalter-Sender:  {synthetic}")
+print(f"Nicht zugeordnet:    {len(unmatched)}")
+print(f"Ausgabe:              {OUTPUT_FILE}")
 
 if unmatched:
     print()
-    print(
-        "Nicht in der EPG-Quelle "
-        "gefunden:"
-    )
-    for name in sorted(
-        set(unmatched),
-        key=str.lower,
-    ):
+    print("Nicht zugeordnet:")
+    for name in sorted(set(unmatched), key=str.lower):
         print(f"  - {name}")
