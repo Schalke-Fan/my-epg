@@ -381,6 +381,105 @@ for sources, aliases in REGULAR_MAP:
 
 
 # ---------------------------------------------------------------------
+# WEITERE REGULÄRE SENDER MIT ECHTEM EPG
+# ---------------------------------------------------------------------
+
+EXTRA_REGULAR_MAP = [
+    (
+        ["RTL.Crime.de", "RTL Crime"],
+        ["RTL Crime HD", "RTL Crime FHD"],
+    ),
+    (
+        ["Warner.TV.Comedy.de", "Warner TV Comedy"],
+        [
+            "Warner Comedy HD",
+            "Warner Comedy FHD",
+            "Warner TV Comedy HD",
+            "Warner TV Comedy FHD",
+        ],
+    ),
+    (
+        ["Warner.TV.Film.de", "Warner TV Film"],
+        [
+            "Warner Film HD",
+            "Warner Film FHD",
+            "Warner TV Film HD",
+            "Warner TV Film FHD",
+        ],
+    ),
+    (
+        ["Warner.TV.Serie.de", "Warner TV Serie"],
+        [
+            "Warner Serie HD",
+            "Warner Serie FHD",
+            "Warner TV Serie HD",
+            "Warner TV Serie FHD",
+        ],
+    ),
+    (
+        ["Sky.Showcase.HD.de", "sky.showcase.de", "Sky Showcase"],
+        ["Sky Showcase HD", "Sky Showcase FHD"],
+    ),
+    (
+        ["Sky.Replay.HD.de", "sky.replay.de", "Sky Replay"],
+        ["Sky Replay HD", "Sky Replay FHD"],
+    ),
+    (
+        ["Sky.Crime.de", "Sky Crime"],
+        ["Sky Crime HD", "Sky Crime FHD"],
+    ),
+    (
+        ["Sky.Documentaries.de", "Sky Documentaries"],
+        ["Sky Documentaries HD", "Sky Documentaries FHD"],
+    ),
+    (
+        ["Sky.Krimi.de", "Sky Krimi"],
+        ["Sky Krimi HD", "Sky Krimi FHD"],
+    ),
+    (
+        ["Sky.Nature.de", "Sky Nature"],
+        ["Sky Nature HD", "Sky Nature FHD"],
+    ),
+    (
+        ["13th.Street.Universal.de", "13th Street"],
+        ["13th Street HD", "13th Street FHD"],
+    ),
+    (
+        ["Discovery.HD.de", "Discovery"],
+        ["Discovery HD", "Discovery FHD"],
+    ),
+    (
+        ["SyFy.de", "SyFy"],
+        ["SyFy HD", "SyFy FHD"],
+    ),
+    (
+        ["Nat.Geo.HD.de", "National Geographic", "Nat Geo"],
+        [
+            "National Geographic HD",
+            "National Geographic FHD",
+            "Nat Geo HD",
+            "Nat Geo FHD",
+        ],
+    ),
+    (
+        ["NAT.GEO.WILD.de", "Nat Geo Wild"],
+        ["Nat Geo Wild HD", "Nat Geo Wild FHD"],
+    ),
+    (
+        ["RTL.Living.de", "RTL Living"],
+        ["RTL Living HD", "RTL Living FHD"],
+    ),
+    (
+        ["RTL.Passion.de", "RTL Passion"],
+        ["RTL Passion HD", "RTL Passion FHD"],
+    ),
+]
+
+for sources, aliases in EXTRA_REGULAR_MAP:
+    add(sources, *aliases, fallback=True)
+
+
+# ---------------------------------------------------------------------
 # MYTEAM TV / MAGENTA
 # ---------------------------------------------------------------------
 
